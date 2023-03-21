@@ -15,6 +15,8 @@ chmod -R 0775 /var/mail/imapsieve_copy
 chmod 0755 /etc/dovecot/sieve/*
 chmod 0775 /var/mail/sieve/
 chmod 0644 /var/mail/sieve/*
-chmod 755 /etc/cron.daily/spamham && chown root:root /etc/cron.daily/spamham
+
+chmod 755 /etc/cron.daily/spamham
+chown root:root /etc/cron.daily/spamham
 
 service dovecot restart
