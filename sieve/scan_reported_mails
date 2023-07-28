@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Author: Zhang Huangbin <zhb@iredmail.org>
 # Purpose: Copy spam/ham to another directory and call sa-learn to learn.
 
