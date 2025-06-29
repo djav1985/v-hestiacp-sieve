@@ -11,7 +11,6 @@ Autolearn spam ham, it has files and dirs, the script moves them to thier place 
 - `mail/sieve/report_ham.sieve`: Sieve script to report messages as ham when moved out of the Spam folder (except to Trash).
 - `sieve/imapsieve_copy`: Bash script called by Sieve to save reported spam/ham emails to disk for later processing.
 - `cron.daily/spamham`: Daily cron job script that processes reported spam/ham emails and feeds them to sa-learn for SpamAssassin training.
-- `default/spamassassin`: Default configuration for SpamAssassin, including enabling the rules update cron job.
 - `local.cf`: (If present) Local SpamAssassin configuration overrides.
 
 ### To Install
