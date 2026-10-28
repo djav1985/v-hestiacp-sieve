@@ -5,86 +5,78 @@
 # Paths to find program.
 export PATH="/bin:/usr/bin:/usr/local/bin:$PATH"
 
+# Set variables
 export OWNER="mail"
 export GROUP="mail"
-
-# The SPAMD daemon user.
-# Note: on OpenBSD, it's "_vscan". On FreeBSD, it's "vscan".
 export SPAMD_USER='debian-spamd'
 export SPAMD_USER_HOMEDIR="$(eval echo ~${SPAMD_USER})"
-
-# Kernel name, in upper cases.
 export KERNEL_NAME="$(uname -s | tr '[a-z]' '[A-Z]')"
-
-# A temporary lock file. should be removed after successfully examed messages.
-export LOCK_FILE='/tmp/scan_reported_mails.lock'
-
-# Logging to syslog with 'logger' command.
+export LOCK_FILE='/run/lock/scan_reported_mails.lock'
 export LOG='logger -p local5.info -t scan_reported_mails'
-
-# `sa-learn` command, with optional arguments.
-export SA_LEARN="sa-learn --no-sync -u ${SPAMD_USER} --dbpath ${SPAMD_USER_HOMEDIR}/bayes"
-
-# Spool directory.
-# Must be owned by mail:mail.
+export SA_LEARN="-u ${SPAMD_USER} --dbpath ${SPAMD_USER_HOMEDIR}/bayes"
 export SPOOL_DIR='/var/mail/imapsieve_copy'
-
-# Directories which store spam and ham emails.
-# These 2 should be created while setup Dovecot antispam plugin.
 export SPOOL_SPAM_DIR="${SPOOL_DIR}/spam"
 export SPOOL_HAM_DIR="${SPOOL_DIR}/ham"
-
-# Directory used to store emails we're going to process.
-# We will copy new spam/ham messages to these directories, scan them, then
-# remove them.
 export SPOOL_LEARN_SPAM_DIR="${SPOOL_DIR}/processing/spam"
 export SPOOL_LEARN_HAM_DIR="${SPOOL_DIR}/processing/ham"
 
-if [ -e ${LOCK_FILE} ]; then
-    find $(dirname ${LOCK_FILE}) -maxdepth 1 -ctime 1 "$(basename ${LOCK_FILE})" >/dev/null 2>&1
-    if [ X"$?" == X'0' ]; then
-        rm -f ${LOCK_FILE} >/dev/null 2>&1
-    else
-        ${LOG} "Lock file exists (${LOCK_FILE}), abort."
-        exit
+# Hold an exclusive lock for the entire job. The kernel releases it on exit.
+# Keep the file in place: deleting it could let another process lock a new inode.
+if ! command -v flock >/dev/null 2>&1; then
+    printf 'Cannot run spam training: flock is not installed.\n' >&2
+    exit 1
+fi
+exec 9>>"${LOCK_FILE}" || exit 1
+if flock -n -E 75 9; then
+    : # File descriptor 9 holds the lock until the job exits.
+else
+    lock_status=$?
+    if [ "$lock_status" -eq 75 ]; then
+        logger -p local5.info -t scan_reported_mails 'Spam training is already running; skipping this run.'
+        exit 0
     fi
+    printf 'Cannot acquire spam-training lock (exit %s).\n' "$lock_status" >&2
+    exit "$lock_status"
 fi
 
+# Ensure directories exist and have proper permissions
 for dir in "${SPOOL_DIR}" "${SPOOL_LEARN_SPAM_DIR}" "${SPOOL_LEARN_HAM_DIR}"; do
-    if [[ ! -d ${dir} ]]; then
-        mkdir -p ${dir}
-    fi
-
-    chown ${OWNER}:${GROUP} ${dir}
-    chmod 0775 ${dir}
+    mkdir -p "${dir}" || exit 1
+    chown "${OWNER}:${GROUP}" "${dir}" || exit 1
+    chmod 0775 "${dir}" || exit 1
 done
 
-# If there're a lot files, direct `mv` command may fail with error like
-# `argument list too long`, so we need `find` in this case.
-if [[ X"${KERNEL_NAME}" == X'OPENBSD' ]] || [[ X"${KERNEL_NAME}" == X'FREEBSD' ]]; then
+# Move files to processing directories
+if [[ "${KERNEL_NAME}" == 'OPENBSD' || "${KERNEL_NAME}" == 'FREEBSD' ]]; then
     [[ -d ${SPOOL_SPAM_DIR} ]] && find ${SPOOL_SPAM_DIR} -name '*.eml' -exec mv {} ${SPOOL_LEARN_SPAM_DIR}/ \;
-    [[ -d ${SPOOL_HAM_DIR} ]]  && find ${SPOOL_HAM_DIR}  -name '*.eml' -exec mv {} ${SPOOL_LEARN_HAM_DIR}/  \;
+    [[ -d ${SPOOL_HAM_DIR} ]] && find ${SPOOL_HAM_DIR} -name '*.eml' -exec mv {} ${SPOOL_LEARN_HAM_DIR}/ \;
 else
     [[ -d ${SPOOL_SPAM_DIR} ]] && find ${SPOOL_SPAM_DIR} -name '*.eml' -exec mv -t ${SPOOL_LEARN_SPAM_DIR}/ {} +
-    [[ -d ${SPOOL_HAM_DIR} ]]  && find ${SPOOL_HAM_DIR}  -name '*.eml' -exec mv -t ${SPOOL_LEARN_HAM_DIR}/  {} +
+    [[ -d ${SPOOL_HAM_DIR} ]] && find ${SPOOL_HAM_DIR} -name '*.eml' -exec mv -t ${SPOOL_LEARN_HAM_DIR}/ {} +
 fi
 
-# Try to delete empty directory, if failed, that means we have some messages to
-# scan.
-rmdir ${SPOOL_LEARN_SPAM_DIR} &>/dev/null
-if [[ X"$?" != X'0' ]]; then
-    output="$(${SA_LEARN} --spam ${SPOOL_LEARN_SPAM_DIR})"
-    rm -rf ${SPOOL_LEARN_SPAM_DIR} &>/dev/null
-    ${LOG} '[SPAM]' ${output}
+# Keep processing samples until both training passes and the database sync succeed.
+training_failed=0
+for category in spam ham; do
+    processing_dir="${SPOOL_DIR}/processing/${category}"
+    if [ -z "$(find "$processing_dir" -maxdepth 1 -type f -name '*.eml' -print -quit)" ]; then
+        continue
+    fi
+    if output="$(sa-learn ${SA_LEARN} --no-sync "--${category}" "$processing_dir" 2>&1)"; then
+        logger -p local5.info -t scan_reported_mails "[$category] $output"
+    else
+        training_failed=1
+        logger -p local5.err -t scan_reported_mails "[$category] Training failed; samples retained: $output"
+    fi
+done
+if [ "$training_failed" -ne 0 ]; then
+    exit 1
 fi
 
-rmdir ${SPOOL_LEARN_HAM_DIR} &>/dev/null
-if [[ X"$?" != X'0' ]]; then
-    output="$(${SA_LEARN} --ham ${SPOOL_LEARN_HAM_DIR})"
-    rm -rf ${SPOOL_LEARN_HAM_DIR} &>/dev/null
-    ${LOG} '[CLEAN]' ${output}
+# Sync the same database before removing any successfully trained samples.
+if ! sa-learn ${SA_LEARN} --sync >>/var/log/spamham.log 2>&1; then
+    logger -p local5.err -t scan_reported_mails 'Bayes sync failed; all processing samples retained.'
+    exit 1
 fi
-
-sa-learn --sync >> /var/log/sa-learn.log 2>&1
-
-rm -f ${LOCK_FILE} &>/dev/null
+find "$SPOOL_LEARN_SPAM_DIR" "$SPOOL_LEARN_HAM_DIR" -maxdepth 1 -type f -name '*.eml' -delete || exit 1
+# The lock is released automatically when this process exits.

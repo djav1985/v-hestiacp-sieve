@@ -1,15 +1,29 @@
 #!/bin/bash
-# Usage: bash imapsieve_copy <email> <spam|ham> <output_base_dir>
-
-export USER="$1"
-export MSG_TYPE="$2"
-
-export OUTPUT_BASE_DIR="/var/mail/imapsieve_copy"
-export OUTPUT_DIR="${OUTPUT_BASE_DIR}/${MSG_TYPE}"
-export FILE="${OUTPUT_DIR}/${USER}-$(date +%Y%m%d%H%M%S)-${RANDOM}${RANDOM}.eml"
-
-cat > ${FILE} < /dev/stdin
-
-# Logging
-export LOG='logger -p local5.info -t imapsieve_copy'
-[[ $? == 0 ]] && ${LOG} "Copied one ${MSG_TYPE} email reported by ${USER}: ${FILE}"
+# Queue a complete message for SpamAssassin training.
+set -eu
+if [ "$#" -ne 2 ] || [ -z "$1" ]; then
+    printf 'Usage: imapsieve_copy EMAIL spam|ham\n' >&2
+    exit 2
+fi
+case "$2" in
+    spam|ham) ;;
+    *) printf 'Message type must be spam or ham.\n' >&2; exit 2 ;;
+esac
+report_user="$1"
+message_type="$2"
+output_dir="/var/mail/imapsieve_copy/${message_type}"
+# Keep usernames out of path components and use a unique temporary filename.
+safe_user="${report_user//[^a-zA-Z0-9@._-]/_}"
+umask 007
+mkdir -p -- "$output_dir"
+temp_file=$(mktemp "${output_dir}/${safe_user}.XXXXXXXXXX.tmp")
+trap 'rm -f -- "$temp_file"' EXIT
+# Publish only complete messages: the daily job picks up .eml files exclusively.
+if ! cat > "$temp_file"; then
+    logger -p local5.err -t imapsieve_copy "Failed to write ${message_type} sample for ${report_user}."
+    exit 1
+fi
+sample_file="${temp_file%.tmp}.eml"
+mv -- "$temp_file" "$sample_file"
+trap - EXIT
+logger -p local5.info -t imapsieve_copy "Copied one ${message_type} email reported by ${report_user}: ${sample_file}"
